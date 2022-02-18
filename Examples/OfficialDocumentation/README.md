@@ -87,3 +87,126 @@ Our RPC will work like this:
 * The request is sent to an rpc_queue queue.
 * The RPC worker (aka: server) is waiting for requests on that queue. When a request appears, it does the job and sends a message with the result back to the Client, using the queue from the ReplyTo property.
 * The client waits for data on the callback queue. When a message appears, it checks the CorrelationId property. If it matches the value from the request it returns the response to the application.
+
+
+### Publisher Confirms
+
+Publisher confirms are a RabbitMQ extension to the AMQP 0.9.1 protocol, so they are not enabled by default. Publisher confirms are enabled at the channel level with the ConfirmSelect method:
+
+```c#
+var channel = connection.CreateModel();
+channel.ConfirmSelect();
+```
+
+This method must be called on every channel that you expect to use publisher confirms. Confirms should be enabled just once, not for every message published.
+
+### Strategy #1: Publishing Messages Individually
+
+```c#
+while (ThereAreMessagesToPublish())
+{
+    byte[] body = ...;
+    IBasicProperties properties = ...;
+    channel.BasicPublish(exchange, queue, properties, body);
+    // uses a 5 second timeout
+    channel.WaitForConfirmsOrDie(new TimeSpan(0, 0, 5));
+}
+```
+
+This technique is very straightforward but also has a major drawback: it significantly slows down publishing, as the confirmation of a message blocks the publishing of all subsequent messages. This approach is not going to deliver throughput of more than a few hundreds of published messages per second. Nevertheless, this can be good enough for some applications.
+
+### Strategy #2: Publishing Messages in Batches
+To improve upon our previous example, we can publish a batch of messages and wait for this whole batch to be confirmed. The following example uses a batch of 100:
+
+```c#
+var batchSize = 100;
+var outstandingMessageCount = 0;
+while (ThereAreMessagesToPublish())
+{
+    byte[] body = ...;
+    IBasicProperties properties = ...;
+    channel.BasicPublish(exchange, queue, properties, body);
+    outstandingMessageCount++;
+    if (outstandingMessageCount == batchSize)
+    {
+        channel.WaitForConfirmsOrDie(new TimeSpan(0, 0, 5));
+        outstandingMessageCount = 0;
+    }
+}
+if (outstandingMessageCount > 0)
+{
+    channel.WaitForConfirmsOrDie(new TimeSpan(0, 0, 5));
+}
+```
+
+Waiting for a batch of messages to be confirmed improves throughput drastically over waiting for a confirm for individual message (up to 20-30 times with a remote RabbitMQ node). One drawback is that we do not know exactly what went wrong in case of failure, so we may have to keep a whole batch in memory to log something meaningful or to re-publish the messages. And this solution is still synchronous, so it blocks the publishing of messages.
+
+### Strategy #3: Handling Publisher Confirms Asynchronously
+The broker confirms published messages asynchronously, one just needs to register a callback on the client to be notified of these confirms:
+
+```c#
+var channel = connection.CreateModel();
+channel.ConfirmSelect();
+channel.BasicAcks += (sender, ea) =>
+{
+  // code when message is confirmed
+};
+channel.BasicNacks += (sender, ea) =>
+{
+  //code when message is nack-ed
+};
+```
+
+The sequence number can be obtained with Channel#NextPublishSeqNo before publishing:
+```c#
+var sequenceNumber = channel.NextPublishSeqNo;
+channel.BasicPublish(exchange, queue, properties, body);
+```
+
+Here is a code sample that uses a dictionary to correlate the publishing sequence number with the string body of the message:
+```c#
+var outstandingConfirms = new ConcurrentDictionary<ulong, string>();
+// ... code for confirm callbacks will come later
+var body = "...";
+outstandingConfirms.TryAdd(channel.NextPublishSeqNo, body);
+channel.BasicPublish(exchange, queue, properties, Encoding.UTF8.GetBytes(body));
+```
+
+The publishing code now tracks outbound messages with a dictionary. We need to clean this dictionary when confirms arrive and do something like logging a warning when messages are nack-ed:
+```c#
+var outstandingConfirms = new ConcurrentDictionary<ulong, string>();
+
+void cleanOutstandingConfirms(ulong sequenceNumber, bool multiple)
+{
+    if (multiple)
+    {
+        var confirmed = outstandingConfirms.Where(k => k.Key <= sequenceNumber);
+        foreach (var entry in confirmed)
+        {
+            outstandingConfirms.TryRemove(entry.Key, out _);
+        }
+    }
+    else
+    {
+        outstandingConfirms.TryRemove(sequenceNumber, out _);
+    }
+}
+
+channel.BasicAcks += (sender, ea) => cleanOutstandingConfirms(ea.DeliveryTag, ea.Multiple);
+channel.BasicNacks += (sender, ea) =>
+{
+    outstandingConfirms.TryGetValue(ea.DeliveryTag, out string body);
+    Console.WriteLine($"Message with body {body} has been nack-ed. Sequence number: {ea.DeliveryTag}, multiple: {ea.Multiple}");
+    cleanOutstandingConfirms(ea.DeliveryTag, ea.Multiple);
+};
+// ... publishing code
+```
+
+```
+Re-publishing nack-ed Messages?
+It can be tempting to re-publish a nack-ed message from the corresponding callback but this should be avoided, as confirm callbacks are dispatched in an I/O thread where channels are not supposed to do operations. A better solution consists in enqueuing the message in an in-memory queue which is polled by a publishing thread. A class like ConcurrentQueue would be a good candidate to transmit messages between the confirm callbacks and a publishing thread.
+```
+
+-   publishing messages individually, waiting for the confirmation synchronously: simple, but very limited throughput.
+-   publishing messages in batch, waiting for the confirmation synchronously for a batch: simple, reasonable throughput, but hard to reason about when something goes wrong.
+-   asynchronous handling: best performance and use of resources, good control in case of error, but can be involved to implement correctly.
