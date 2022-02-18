@@ -50,3 +50,40 @@ When a queue is bound with "#" (hash) binding key - it will receive all the mess
 
 When special characters "*" (star) and "#" (hash) aren't used in bindings, the topic exchange will behave just like a direct one.
 ```
+
+### RPC
+
+But what if we need to run a function on a remote computer and wait for the result? Well, that's a different story. This pattern is commonly known as Remote Procedure Call or RPC.
+
+**A note on RPC**
+```
+Although RPC is a pretty common pattern in computing, it's often criticised. The problems arise when a programmer is not aware whether a function call is local or if it's a slow RPC. Confusions like that result in an unpredictable system and adds unnecessary complexity to debugging. Instead of simplifying software, misused RPC can result in unmaintainable spaghetti code
+Bearing that in mind, consider the following advice:
+
+Make sure it's obvious which function call is local and which is remote.
+Document your system. Make the dependencies between components clear.
+Handle error cases. How should the client react when the RPC server is down for a long time?
+```
+
+```
+Message properties
+The AMQP 0-9-1 protocol predefines a set of 14 properties that go with a message. Most of the properties are rarely used, with the exception of the following:
+
+Persistent: Marks a message as persistent (with a value of true) or transient (any other value). Take a look at the second tutorial.
+DeliveryMode: those familiar with the protocol may choose to use this property instead of Persistent. They control the same thing.
+ContentType: Used to describe the mime-type of the encoding. For example for the often used JSON encoding it is a good practice to set this property to: application/json.
+ReplyTo: Commonly used to name a callback queue.
+CorrelationId: Useful to correlate RPC responses with requests.
+```
+
+If we see an unknown CorrelationId value, we may safely discard the message - it doesn't belong to our requests.
+
+Our RPC will work like this:
+
+![Reply Queue](./img/reply-queue.png)
+
+* When the Client starts up, it creates an anonymous exclusive callback queue.
+* For an RPC request, the Client sends a message with two properties: ReplyTo, which is set to the callback queue and CorrelationId, which is set to a unique value for every request.
+* The request is sent to an rpc_queue queue.
+* The RPC worker (aka: server) is waiting for requests on that queue. When a request appears, it does the job and sends a message with the result back to the Client, using the queue from the ReplyTo property.
+* The client waits for data on the callback queue. When a message appears, it checks the CorrelationId property. If it matches the value from the request it returns the response to the application.
