@@ -1,6 +1,7 @@
 # Book:  RabbitMQ Essentials - Second Edition
 
-## Messageing Queue
+## Messageing Queue
+
 Messaging or message queuing is a method of communication between applications or components. 
 Thanks to message queues, these applications can remain completely separate as they process their individual tasks. 
 
@@ -38,7 +39,7 @@ The following is a list of the core concepts of AMQP
 
 ![Basic concepts](https://learning.oreilly.com/api/v2/epubs/urn:orm:book:9781789131666/files/assets/eb85d456-ba34-460a-ba06-4a916b6296f3.png)
 
-### Rabbitmq supports fedaration and clustering mechanisms.
+**Rabbitmq supports fedaration and clustering mechanisms.**
 
 Exploring the benefits of message queuing
 
