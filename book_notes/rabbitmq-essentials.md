@@ -95,3 +95,97 @@ An exchange declaration is only idempotent if the exchange properties are the sa
 
 Ensure that messages are not lost by declaring a queue as durable and setting the message delivery mode to persistent.
 
+### Consuming Nessages
+
+There's the polling-based `basic.get` method and the push-based `basic.consume` method. Make sure that the consumer consumes messages from the queue instead of using basic GET actions. The basic.get command is comparatively expensive when it comes to resources.
+
+### Acknowledgment and negative acknowledgment
+
+RabbitMQ needs to know when a message can be considered successful in terms of being sent to the consumer as expected. The broker should then delete messages from the queue once the broker receives the response; otherwise, the queue would overflow. The client can reply to the broker by either acking (acknowledge) the message when it receives it or when the consumer has completely processed the message. In either situation, once the message has been ack:ed, it's removed from the queue.
+
+To avoid a situation where a message could be forever lost (for example, worker crashed, exceptions, and so on), the consuming application should not acknowledge a message until it is completely finished with it.
+
+Channels are full-duplex, meaning that one channel can be used to both publish and consume messages.
+
+A low prefetch value is recommended in situations where there are many consumers and a short processing time. If the prefetch value is set too low, the consumers will be idle much of the time, waiting for messages to arrive. On the other hand, if the prefetch value is too high, one consumer may be very busy while the others are idle.
+
+In scenarios where there are many consumers and/or a longer time to process messages, it is recommended that the prefetch value is set to one (1) to evenly distribute messages among all consumers.
+
+**If the client is set to auto-ack messages, prefetch settings will have no effect.**
+
+### Dead Letter Messages:
+
+A dead letter is a message that can't be delivered, either because the intended target cannot be accessed or because it has expired. In the case of CC, messages that reach their TTL will become dead letters.
+
+```ruby
+# Declare a queue for a taxi inbox 1
+queue1 = channel.queue('taxi-inbox.1', 
+  durable: true, 
+  arguments:{
+    'x-message-ttl'=> 604800000, 
+    'x-dead-letter-exchange'=> 'taxi-dlx', 
+    'x-dead-letter-routing-key'=> 'taxi-inbox.1'
+  }
+)
+```
+
+This strategy to refactor the existing queues is achieved with the following single command-line operation:
+
+`sudo rabbitmqctl set_policy -p cc-dev-vhost Q_TTL_DLX "taxi\.\d+" '{"message-ttl":604800000, "dead-letter-exchange":"taxi-dlx"}' 
+--apply-to queues`
+
+### Applying Dead-Letter Queue:
+
+1. Start by declaring two queues with x-message-ttl set to 604800000:
+```ruby
+queue1 = channel.queue('taxi-inbox.1', durable: true,
+  arguments: {'x-message-ttl'=> 604800000, 'x-dead-letter-exchange'=> 'taxi-dlx'})
+
+queue2 = channel.queue('taxi-inbox.2', durable: true,
+  arguments: {'x-message-ttl'=> 604800000, 'x-dead-letter-exchange'=> 'taxi-dlx'})
+```
+2. Declare a fanout exchange taxi-fanout:
+```ruby
+exchange = channel.fanout('taxi-fanout')
+```
+3. Bind both queues to the exchange:
+```ruby
+queue1.bind(exchange, routing_key: "")
+queue2.bind(exchange, routing_key: "")
+```
+
+4. Declare a dead letter queue, taxi-dlq:
+```ruby
+taxi_dlq = channel.queue('taxi-dlq', durable: true)
+```
+
+5. Declare a dead letter fanout exchange, taxi-dlx:
+```ruby
+dlx_exchange = channel.fanout('taxi-dlx')
+```
+6. Now taxi-dlx needs to be bound to taxi-dlq:
+```ruby
+taxi_dlq.bind(dlx_exchange, routing_key: "")
+```
+Finally, publish a message:
+```ruby
+exchange.publish("Hello! This is an information message!",   key: "")
+```
+As you can see, this is just a standard fanout exchange declaration
+
+```bash
+
+$ sudo rabbitmqctl set_policy 
+-p cc-dev-vhost Q_TTL_DLX "taxi-inbox\.\d+ " '{"message-ttl":604800000, "dead-letter-exchange":"taxi-dlx"}' --apply-to queues
+
+Setting policy "Q_TTL_DLX" for pattern "taxi-inbox\.\d+ " to "{\"message-ttl\":604800000, \"dead-letter-exchange\":\"taxi-dlx\"}" with priority "0" ...
+...done.
+```
+
+The Delayed Message Plugin is available for RabbitMQ 3.5.3 and later versions of RabbitMQ. The Delayed Message Plugin adds a new exchange type to RabbitMQ.
+
+## Mirroring Queues:
+In the case of CC, the data in the queues needs to be highly available. Mirrored queues provide this type of security. Queue mirroring uses a master-mirror design pattern. All message queuing and dequeuing actions happen with the master, and the mirrors receive the updates periodically from the master. If a master becomes unavailable, RabbitMQ promotes a mirror to a master; usually, the oldest mirror becomes the new master, as long as it is synchronized.
+
+## How to avoid losing messages
+For the most part, CC has followed the best practice of keeping queues short and efficient. Queues that contain too many messages have a negative impact on the broker's performance. An identified high RAM usage could indicate that the number of queued messages rapidly went up
