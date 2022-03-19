@@ -1,7 +1,7 @@
 # rabbitmq-tutorial
 ## Notes
 ### Book Notes:
-[RabbitMQ Essentials](/book_notes/rabbitmq-essentials.md)
+[RabbitMQ Essentials](/book_notes/RabbitMQ-Essentials/rabbitmq-essentials.md)
 
 ### Official Website Tutorial
 
